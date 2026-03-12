@@ -1,0 +1,18 @@
+# Credentials — never commit
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime logs
+logs/
+
+# SQLite state files
+state/*.db
+state/*.db-shm
+state/*.db-wal
+
+# Empty runtime dirs
+data/
