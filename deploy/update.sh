@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/coinbase-bot"
-BOT_DIR="$INSTALL_DIR/local-trading-bot"
+BOT_DIR="$INSTALL_DIR"
 SERVICE_USER="botrunner"
 
 echo "[1/4] Stopping coinbase-bot service..."

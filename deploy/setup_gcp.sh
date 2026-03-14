@@ -6,7 +6,7 @@
 #   chmod +x setup_gcp.sh && sudo bash setup_gcp.sh
 #
 # After it completes:
-#   1. Edit the .env file:          sudo nano /opt/coinbase-bot/local-trading-bot/.env
+#   1. Edit the .env file:          sudo nano /opt/coinbase-bot/.env
 #   2. Enable and start the bot:    sudo systemctl enable --now coinbase-bot
 #   3. Tail live logs:              journalctl -u coinbase-bot -f
 # =============================================================================
@@ -50,7 +50,7 @@ else
     git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
-BOT_DIR="$INSTALL_DIR/local-trading-bot"
+BOT_DIR="$INSTALL_DIR"
 
 # ── 4. Python virtual environment ────────────────────────────────────────────
 echo "[4/7] Creating Python virtual environment..."
