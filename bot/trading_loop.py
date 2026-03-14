@@ -44,7 +44,7 @@ def initialize_bot(config: Config) -> tuple:
     log.info("=" * 60)
     log.info(f"Coinbase Algo Trading Bot — {mode} MODE")
     log.info(f"Pair:       {config.trading_pair}")
-    log.info(f"Timeframe:  {config.timeframe}  |  MA{config.ma_short_period}/MA{config.ma_long_period}")
+    log.info(f"Strategy:   {config.strategy_name}  |  Timeframe: {config.timeframe}")
     log.info(f"Trade size: ${config.min_trade_size_usd}–${config.max_trade_size_usd} (spread-sized)")
     log.info(f"Max pos:    ${config.max_position_usd}  |  Max drawdown: {config.max_drawdown_percent}%")
     log.info(f"Equity:     ${config.initial_equity_usd}")
@@ -93,33 +93,37 @@ def run_tick(
             log.warning(f"Tick #{tick_number}: OHLCV fetch failed — {e}")
             return
 
-        # ── Step 4: Compute MAs (needed for signal + trade sizing) ──
+        # ── Step 4: Compute signal via configured strategy ──────────
         try:
-            df_with_ma = strategy.compute_moving_averages(
-                df, config.ma_short_period, config.ma_long_period
-            )
-            signal = strategy.detect_crossover(df_with_ma)
-        except ValueError as e:
+            signal = strategy.dispatch_strategy(df, config)
+        except Exception as e:
             log.error(f"Tick #{tick_number}: signal computation failed — {e}")
             return
 
         log.debug(f"Tick #{tick_number}: signal={signal.value}")
 
         # ── Step 5: Signal deduplication ────────────────────────────
-        latest = df_with_ma.iloc[-1]
-        ma_info = f"MA{config.ma_short_period}={latest['ma_short']:.2f} MA{config.ma_long_period}={latest['ma_long']:.2f}"
+        latest = df.iloc[-1]
+        price_info = f"price=${latest['close']:,.2f}"
 
         if signal == Signal.HOLD:
-            log.info(f"Tick #{tick_number}: HOLD | {ma_info} | price=${latest['close']:,.2f}")
+            log.info(f"Tick #{tick_number}: HOLD | {config.strategy_name} | {price_info}")
             return
 
         if signal.value == state["last_signal"]:
             log.info(
-                f"Tick #{tick_number}: {signal.value} (already acted on) | {ma_info}"
+                f"Tick #{tick_number}: {signal.value} (already acted on) | {config.strategy_name}"
             )
             return
 
         # ── Step 3b: Compute opportunity-sized trade amount ─────────
+        # Always uses MA20/50 spread for sizing regardless of strategy
+        try:
+            df_with_ma = strategy.compute_moving_averages(
+                df, config.ma_short_period, config.ma_long_period
+            )
+        except ValueError:
+            df_with_ma = df
         trade_size_usd = strategy.compute_trade_size(
             df_with_ma,
             config.min_trade_size_usd,

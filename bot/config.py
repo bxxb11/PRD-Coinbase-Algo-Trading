@@ -57,14 +57,31 @@ class Config:
     # Mode
     paper_trading: bool
 
-    # Strategy
+    # Strategy selector
+    strategy_name: str          # "ma_crossover" | "macd" | "ema_rsi"
     timeframe: str
-    ma_short_period: int
-    ma_long_period: int
     candles_required: int
     loop_interval_seconds: int
 
-    # Sizing
+    # MA Crossover params
+    ma_short_period: int
+    ma_long_period: int
+
+    # MACD params
+    macd_fast: int
+    macd_slow: int
+    macd_signal_period: int
+    macd_zero_filter: bool
+
+    # EMA+RSI params (recommended strategy)
+    ema_short: int
+    ema_long: int
+    rsi_period: int
+    rsi_buy_thresh: float
+    rsi_sell_thresh: float
+    trend_confirm_bars: int
+
+    # Sizing ($1–$20 per trade, spread-driven)
     min_trade_size_usd: float
     max_trade_size_usd: float
     size_spread_min_pct: float
@@ -98,6 +115,13 @@ def load_config() -> Config:
             "COINBASE_API_KEY and COINBASE_API_SECRET are required when PAPER_TRADING=False"
         )
 
+    strategy_name = _get_str("STRATEGY", "ema_rsi").lower()
+    _valid_strategies = {"ma_crossover", "macd", "ema_rsi"}
+    if strategy_name not in _valid_strategies:
+        raise ConfigValidationError(
+            f"STRATEGY must be one of {sorted(_valid_strategies)}, got: {strategy_name!r}"
+        )
+
     ma_short = _get_int("MA_SHORT_PERIOD", 20)
     ma_long = _get_int("MA_LONG_PERIOD", 50)
     if ma_short >= ma_long:
@@ -105,10 +129,29 @@ def load_config() -> Config:
             f"MA_SHORT_PERIOD ({ma_short}) must be less than MA_LONG_PERIOD ({ma_long})"
         )
 
-    candles_required = _get_int("CANDLES_REQUIRED", 100)
-    if candles_required < ma_long + 10:
+    ema_short = _get_int("EMA_SHORT", 13)
+    ema_long  = _get_int("EMA_LONG", 55)
+    if ema_short >= ema_long:
         raise ConfigValidationError(
-            f"CANDLES_REQUIRED ({candles_required}) must be at least MA_LONG_PERIOD + 10 ({ma_long + 10})"
+            f"EMA_SHORT ({ema_short}) must be less than EMA_LONG ({ema_long})"
+        )
+
+    # candles_required must cover the warmup of the active strategy
+    macd_slow   = _get_int("MACD_SLOW", 26)
+    macd_signal = _get_int("MACD_SIGNAL_PERIOD", 9)
+    rsi_p       = _get_int("RSI_PERIOD", 21)
+
+    min_candles = {
+        "ma_crossover": ma_long + 10,
+        "macd":         macd_slow + macd_signal + 10,
+        "ema_rsi":      ema_long + rsi_p + 10,
+    }[strategy_name]
+
+    candles_required = _get_int("CANDLES_REQUIRED", max(100, min_candles))
+    if candles_required < min_candles:
+        raise ConfigValidationError(
+            f"CANDLES_REQUIRED ({candles_required}) must be at least {min_candles} "
+            f"for strategy '{strategy_name}'"
         )
 
     min_trade = _get_float("MIN_TRADE_SIZE_USD", 1.0)
@@ -140,18 +183,36 @@ def load_config() -> Config:
         exchange_id="coinbaseadvanced",
         trading_pair=_get_str("TRADING_PAIR", "BTC/USD"),
         paper_trading=paper_trading,
+        # Strategy
+        strategy_name=strategy_name,
         timeframe=_get_str("TIMEFRAME", "1h"),
-        ma_short_period=ma_short,
-        ma_long_period=ma_long,
         candles_required=candles_required,
         loop_interval_seconds=_get_int("LOOP_INTERVAL_SECONDS", 60),
+        # MA Crossover
+        ma_short_period=ma_short,
+        ma_long_period=ma_long,
+        # MACD
+        macd_fast=_get_int("MACD_FAST", 12),
+        macd_slow=macd_slow,
+        macd_signal_period=macd_signal,
+        macd_zero_filter=_get_bool("MACD_ZERO_FILTER", True),
+        # EMA+RSI (recommended)
+        ema_short=ema_short,
+        ema_long=ema_long,
+        rsi_period=rsi_p,
+        rsi_buy_thresh=_get_float("RSI_BUY_THRESH", 45.0),
+        rsi_sell_thresh=_get_float("RSI_SELL_THRESH", 55.0),
+        trend_confirm_bars=_get_int("TREND_CONFIRM_BARS", 3),
+        # Sizing
         min_trade_size_usd=min_trade,
         max_trade_size_usd=max_trade,
         size_spread_min_pct=spread_min,
         size_spread_max_pct=spread_max,
         max_position_usd=max_position,
+        # Risk
         max_drawdown_percent=_get_float("MAX_DRAWDOWN_PERCENT", 25.0),
         initial_equity_usd=_get_float("INITIAL_EQUITY_USD", 1000.0),
+        # Persistence & logging
         db_path=db_path,
         log_dir=log_dir,
         log_level=_get_str("LOG_LEVEL", "INFO").upper(),
