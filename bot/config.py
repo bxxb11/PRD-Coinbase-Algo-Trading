@@ -62,6 +62,7 @@ class Config:
     timeframe: str
     candles_required: int
     loop_interval_seconds: int
+    scheduled_hours: tuple      # e.g. (2, 14) → tick at 02:00 + 14:00 UTC; () = interval mode
 
     # MA Crossover params
     ma_short_period: int
@@ -171,6 +172,23 @@ def load_config() -> Config:
             f"SIZE_SPREAD_MIN_PCT ({spread_min}) must be less than SIZE_SPREAD_MAX_PCT ({spread_max})"
         )
 
+    # Parse SCHEDULED_HOURS (e.g. "2,14" → (2, 14); blank → interval mode)
+    _scheduled_raw = _get_str("SCHEDULED_HOURS", "")
+    scheduled_hours: tuple = ()
+    if _scheduled_raw:
+        try:
+            _parsed = tuple(sorted(int(h.strip()) for h in _scheduled_raw.split(",")))
+        except ValueError:
+            raise ConfigValidationError(
+                f"SCHEDULED_HOURS must be comma-separated integers (0–23), got: {_scheduled_raw!r}"
+            )
+        for h in _parsed:
+            if not (0 <= h <= 23):
+                raise ConfigValidationError(
+                    f"SCHEDULED_HOURS values must be 0–23, got: {h}"
+                )
+        scheduled_hours = _parsed
+
     db_path = _get_str("DB_PATH", "state/trading.db")
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -188,6 +206,7 @@ def load_config() -> Config:
         timeframe=_get_str("TIMEFRAME", "1h"),
         candles_required=candles_required,
         loop_interval_seconds=_get_int("LOOP_INTERVAL_SECONDS", 60),
+        scheduled_hours=scheduled_hours,
         # MA Crossover
         ma_short_period=ma_short,
         ma_long_period=ma_long,

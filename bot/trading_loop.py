@@ -7,6 +7,7 @@ All tick-level failures are logged and the loop continues.
 import sqlite3
 import time
 import traceback
+from datetime import datetime, timezone, timedelta
 
 import ccxt
 
@@ -15,6 +16,25 @@ from bot.config import Config
 from bot.logger import get_system_logger, get_risk_logger
 from bot.risk_manager import RiskDecision
 from bot.strategy import Signal
+
+
+def _seconds_until_next_tick(scheduled_hours: tuple) -> float:
+    """
+    Return seconds until the next scheduled UTC hour.
+    E.g. scheduled_hours=(2, 14) → sleeps until 02:00 or 14:00 UTC, whichever is sooner.
+    Always returns a positive value (minimum 1 second).
+    """
+    now = datetime.now(timezone.utc)
+    candidates = []
+    for h in scheduled_hours:
+        for day_offset in (0, 1):
+            candidate = now.replace(
+                hour=h, minute=0, second=0, microsecond=0
+            ) + timedelta(days=day_offset)
+            if candidate > now:
+                candidates.append(candidate)
+    next_tick = min(candidates)
+    return max(1.0, (next_tick - now).total_seconds())
 
 
 def initialize_bot(config: Config) -> tuple:
@@ -45,6 +65,11 @@ def initialize_bot(config: Config) -> tuple:
     log.info(f"Coinbase Algo Trading Bot — {mode} MODE")
     log.info(f"Pair:       {config.trading_pair}")
     log.info(f"Strategy:   {config.strategy_name}  |  Timeframe: {config.timeframe}")
+    if config.scheduled_hours:
+        hours_str = " & ".join(f"{h:02d}:00" for h in config.scheduled_hours)
+        log.info(f"Schedule:   {hours_str} UTC  (scheduled mode)")
+    else:
+        log.info(f"Interval:   every {config.loop_interval_seconds}s")
     log.info(f"Trade size: ${config.min_trade_size_usd}–${config.max_trade_size_usd} (spread-sized)")
     log.info(f"Max pos:    ${config.max_position_usd}  |  Max drawdown: {config.max_drawdown_percent}%")
     log.info(f"Equity:     ${config.initial_equity_usd}")
@@ -218,8 +243,19 @@ def run_loop(config: Config) -> None:
             tick_start = time.monotonic()
             run_tick(exchange, conn, config, tick_number)
             elapsed = time.monotonic() - tick_start
-            sleep_time = max(0.0, config.loop_interval_seconds - elapsed)
-            log.debug(f"Tick #{tick_number} took {elapsed:.2f}s — sleeping {sleep_time:.1f}s")
+
+            if config.scheduled_hours:
+                sleep_time = _seconds_until_next_tick(config.scheduled_hours)
+                next_dt = datetime.now(timezone.utc) + timedelta(seconds=sleep_time)
+                log.info(
+                    f"Tick #{tick_number} done — next tick at "
+                    f"{next_dt.strftime('%Y-%m-%d %H:%M')} UTC "
+                    f"(in {sleep_time / 3600:.1f}h)"
+                )
+            else:
+                sleep_time = max(0.0, config.loop_interval_seconds - elapsed)
+                log.debug(f"Tick #{tick_number} took {elapsed:.2f}s — sleeping {sleep_time:.1f}s")
+
             time.sleep(sleep_time)
             tick_number += 1
 

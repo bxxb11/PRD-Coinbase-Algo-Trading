@@ -1,22 +1,27 @@
 # Coinbase Algo Trading Bot
 
-A local automated trading bot for Coinbase Advanced Trade, built around an MA20/MA50 crossover strategy. Designed with **stability and risk control as the first priority** — the system prioritises not losing money over making money, especially in v1.
+A 24/7 automated trading bot for Coinbase Advanced Trade — backtest-validated, cloud-deployed, and built with stability as the first priority.
+
+Three selectable strategies (MA Crossover / MACD / **EMA+RSI**), a full backtesting engine with parameter sweep, and one-command GCP deployment via systemd.
 
 ---
 
 ## Features
 
+- **3 selectable strategies** — switch with a single env var; EMA+RSI is the backtest-validated default
+- **Full backtesting system** — Sharpe, max drawdown, win rate, profit factor, parameter sweep
+- **Scheduled or interval ticks** — run every N seconds, or at fixed clock times (e.g. 02:00 + 14:00 UTC)
 - **Paper & live trading** — single `PAPER_TRADING` flag; safe default is `True`
-- **MA20/MA50 crossover strategy** on 1-hour candles (golden cross → BUY, death cross → SELL)
-- **Dynamic trade sizing** — $1–$20 per trade, scaled by MA spread strength (weak signal = small size)
-- **Hard risk limits** — $200 max position cap; 25% max drawdown auto-pauses the bot
-- **Crash-safe state** — SQLite with WAL mode; survives hard kills without data loss
+- **Dynamic trade sizing** — $1–$20 per trade, scaled by MA spread strength
+- **Hard risk limits** — $200 max position; 25% max drawdown auto-pauses the bot
+- **Crash-safe state** — SQLite WAL mode; survives hard kills without data loss
 - **Full audit trail** — append-only trade ledger, three rotating log streams
-- **Zero duplicate orders** — every order carries a unique `client_order_id`; restarts are safe
+- **Zero duplicate orders** — unique `client_order_id` per order; safe to restart
+- **GCP deployment** — one-command VM setup with systemd auto-restart on crash/reboot
 
 ---
 
-## Project Goals (from PRD)
+## Project Goals
 
 | Goal | Target |
 |------|--------|
@@ -32,59 +37,216 @@ A local automated trading bot for Coinbase Advanced Trade, built around an MA20/
 
 ```
 main.py
-  └── trading_loop.py          ← orchestrates every tick (60-min interval)
+  └── bot/trading_loop.py      ← orchestrates every tick (interval or scheduled)
         ├── market_data.py     ← CCXT: fetch_ohlcv + fetch_ticker_price
-        ├── strategy.py        ← pure MA crossover signal + trade sizing
+        ├── strategy.py        ← MA Crossover / MACD / EMA+RSI + dispatch_strategy()
         ├── risk_manager.py    ← position cap + drawdown gate + PAUSED transition
         ├── execution.py       ← paper/live order router + dedup
         ├── state_manager.py   ← all SQLite reads/writes (WAL mode)
         ├── config.py          ← frozen Config dataclass, loads .env
         └── logger.py          ← system.log / trades.log / risk.log
 
+backtest/
+  ├── engine.py          ← vectorised BacktestEngine (O(n) precompute)
+  ├── strategies.py      ← vectorised signal functions for all 3 strategies
+  ├── metrics.py         ← Sharpe, drawdown, profit factor, round-trip pairing
+  ├── sweep.py           ← Cartesian parameter grid sweep
+  ├── data_fetcher.py    ← paginated OHLCV fetch + CSV cache
+  └── report.py          ← console summary + CSV exports
+
 state/
-  └── trading.db              ← bot_state (single row) + trades (ledger)
+  └── trading.db         ← bot_state (single row) + trades (ledger)
 
 logs/
-  ├── system.log              ← all events, also stdout
-  ├── trades.log              ← order fills only
-  └── risk.log                ← drawdown checks, PAUSED transitions
+  ├── system.log         ← all tick events
+  ├── trades.log         ← order fills only
+  └── risk.log           ← drawdown checks, PAUSED transitions
+
+deploy/
+  ├── setup_gcp.sh       ← one-command GCP VM provisioner
+  ├── update.sh          ← pull latest code + restart bot
+  └── DEPLOY.md          ← full deployment walkthrough
 ```
 
 **Data flow per tick:**
 ```
-fetch OHLCV → compute MA20/MA50 → detect crossover → size trade
-    → risk check → execute order (paper or live) → update state
+fetch OHLCV → dispatch_strategy() → signal dedup → size trade
+    → risk check → execute order (paper or live) → update SQLite state
 ```
 
 ---
 
-## Strategy
+## Strategies
 
-### Signal generation
+### Backtest results (12-month BTC/USD, 8,760 × 1h bars, 1.2% round-trip fee)
 
-The bot fetches 100 hourly candles from Coinbase and computes two simple moving averages:
+| Strategy | Best Params | Profit Factor | Trades/yr | Verdict |
+|---|---|---|---|---|
+| **EMA+RSI** ← **WINNER** | EMA 13/55, RSI 21 | **1.12** | 27 | Only strategy > 1.0 |
+| MA Crossover | 20/200 | 1.34 (high variance) | 64 | Fee drag at scale |
+| MACD | 21/55/12 | 0.58 | 54 | Consistent loser |
 
-| Signal | Condition | Label |
-|--------|-----------|-------|
-| **BUY** | MA20 crosses **above** MA50 | Golden cross |
-| **SELL** | MA20 crosses **below** MA50 | Death cross |
-| **HOLD** | No new crossover | — |
+**Why EMA+RSI wins:** 1.2% round-trip fee eliminates high-frequency strategies. EMA+RSI uses pullback entry (improving fill price ~0.5–1.5%), low trade frequency (27/yr minimises fee drag), and Fibonacci EMA periods (13/55) that align with BTC cycle structure.
 
-Signals are deduplicated: if the last executed trade was already a BUY, a new BUY signal is ignored until a SELL crossover occurs first.
+### Strategy details
 
-### Dynamic trade sizing
+**EMA+RSI** (`STRATEGY=ema_rsi`) — recommended
+- BUY: EMA13 > EMA55 for ≥3 consecutive bars AND RSI crosses up through 45
+- SELL: EMA13 < EMA55 for ≥3 consecutive bars AND RSI crosses down through 55
+- RSI uses Wilder smoothing: `ewm(alpha=1/period, adjust=False)`
 
-Trade size scales linearly with the MA spread (how far apart the two MAs are):
+**MACD** (`STRATEGY=macd`)
+- BUY: MACD histogram crosses from negative to positive (and MACD line > 0 if zero_filter=True)
+- SELL: histogram crosses from positive to negative
+
+**MA Crossover** (`STRATEGY=ma_crossover`)
+- BUY: MA20 crosses above MA50 (golden cross)
+- SELL: MA20 crosses below MA50 (death cross)
+
+### Dynamic trade sizing (all strategies)
+
+Trade size scales with the MA20/50 spread — weak signal = smaller size:
 
 ```
-spread % = abs(MA20 - MA50) / MA50 × 100
-
-spread < 0.1%  →  $1.00   (barely crossing — minimum confidence)
+spread < 0.1%  →  $1.00   (minimal confidence)
 spread = 0.3%  →  $10.50  (moderate trend)
-spread ≥ 0.5%  →  $20.00  (strong trend divergence — maximum size)
+spread ≥ 0.5%  →  $20.00  (strong divergence)
 ```
 
-This means the bot risks less capital on weak signals and scales up only when the trend is well-established.
+---
+
+## Backtesting
+
+```bash
+# Single strategy run (first run fetches ~36s from exchange, cached after)
+python run_backtest.py --strategy ema_rsi --months 12
+
+# Load from cached CSV (fast, no exchange needed)
+python run_backtest.py --csv data/BTC_USD_1h_12m.csv --strategy ema_rsi
+
+# Parameter sweep (finds best EMA/RSI combinations)
+python run_backtest.py --strategy ema_rsi --sweep --ema-short 8 13 21 --ema-long 34 55 89
+
+# Save equity curve + trade log to CSV files
+python run_backtest.py --strategy ema_rsi --months 12 --out-dir results/
+```
+
+---
+
+## Quickstart (local)
+
+### Prerequisites
+- Python 3.11+
+- Coinbase Advanced Trade API key with **View** and **Trade** scopes
+
+### Setup
+
+```bash
+git clone https://github.com/bxxb11/PRD-Coinbase-Algo-Trading.git
+cd PRD-Coinbase-Algo-Trading
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` — at minimum set credentials:
+
+```env
+PAPER_TRADING=True
+COINBASE_API_KEY=your_key
+COINBASE_API_SECRET=your_secret
+STRATEGY=ema_rsi          # backtest winner
+```
+
+### Run
+
+```bash
+python main.py
+```
+
+Startup banner (paper mode, EMA+RSI, scheduled ticks off):
+```
+============================================================
+Coinbase Algo Trading Bot — PAPER MODE
+Pair:       BTC/USD
+Strategy:   ema_rsi  |  Timeframe: 1h
+Interval:   every 60s
+Trade size: $1.0–$20.0 (spread-sized)
+Max pos:    $200.0  |  Max drawdown: 25.0%
+============================================================
+```
+
+Stop with `Ctrl+C` — shuts down cleanly and closes the database.
+
+---
+
+## GCP Deployment (24/7)
+
+See **[deploy/DEPLOY.md](deploy/DEPLOY.md)** for the full step-by-step walkthrough.
+
+Quick summary:
+1. Create a GCP e2-micro VM (~$6/month, free tier eligible)
+2. SSH in and run the one-line setup script
+3. Fill in your API keys with `nano`
+4. `sudo systemctl enable --now coinbase-bot`
+
+The bot auto-restarts on crash and survives VM reboots via systemd.
+
+---
+
+## Configuration Reference
+
+All settings live in `.env`. Copy `.env.example` to get started.
+
+### Core
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `PAPER_TRADING` | `True` | `True` = simulate only. `False` = real orders. |
+| `COINBASE_API_KEY` | — | Required when `PAPER_TRADING=False` |
+| `COINBASE_API_SECRET` | — | Required when `PAPER_TRADING=False` |
+| `TRADING_PAIR` | `BTC/USD` | Market to trade |
+| `TIMEFRAME` | `1h` | OHLCV candle timeframe |
+| `LOOP_INTERVAL_SECONDS` | `60` | Seconds between ticks (ignored if SCHEDULED_HOURS set) |
+| `SCHEDULED_HOURS` | _(blank)_ | Comma-separated UTC hours to tick, e.g. `2,14` for 02:00 + 14:00 |
+
+### Strategy
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `STRATEGY` | `ema_rsi` | Active strategy: `ma_crossover` / `macd` / `ema_rsi` |
+| `EMA_SHORT` | `13` | Short EMA period (EMA+RSI only) |
+| `EMA_LONG` | `55` | Long EMA period (EMA+RSI only) |
+| `RSI_PERIOD` | `21` | RSI lookback period (EMA+RSI only) |
+| `RSI_BUY_THRESH` | `45.0` | RSI level to cross up for BUY signal |
+| `RSI_SELL_THRESH` | `55.0` | RSI level to cross down for SELL signal |
+| `TREND_CONFIRM_BARS` | `3` | Consecutive bars EMA alignment required |
+| `MACD_FAST` | `12` | MACD fast EMA period |
+| `MACD_SLOW` | `26` | MACD slow EMA period |
+| `MACD_SIGNAL_PERIOD` | `9` | MACD signal line period |
+| `MACD_ZERO_FILTER` | `True` | Only trade when MACD line is on correct side of zero |
+| `MA_SHORT_PERIOD` | `20` | Short MA window (MA crossover only) |
+| `MA_LONG_PERIOD` | `50` | Long MA window (MA crossover only) |
+
+### Sizing & Risk
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MIN_TRADE_SIZE_USD` | `1.0` | Minimum trade size (weak signal) |
+| `MAX_TRADE_SIZE_USD` | `20.0` | Maximum trade size (strong signal) |
+| `SIZE_SPREAD_MIN_PCT` | `0.1` | MA spread % that maps to MIN size |
+| `SIZE_SPREAD_MAX_PCT` | `0.5` | MA spread % that maps to MAX size |
+| `MAX_POSITION_USD` | `200.0` | Hard cap on total open position |
+| `MAX_DRAWDOWN_PERCENT` | `25.0` | Drawdown % that triggers PAUSED state |
+| `INITIAL_EQUITY_USD` | `1000.0` | Starting equity (paper mode baseline) |
+
+### Persistence & Logging
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CANDLES_REQUIRED` | `100` | OHLCV history to fetch per tick |
+| `DB_PATH` | `state/trading.db` | SQLite database path |
+| `LOG_DIR` | `logs/` | Directory for log files |
+| `LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`) |
 
 ---
 
@@ -104,115 +266,41 @@ Every proposed trade passes through three gates in order:
 | Drawdown warning | ≥ 22.5% (90% of limit) | `WARNING` logged to risk.log |
 | Max drawdown | ≥ 25% | Bot enters `PAUSED` — DB updated atomically |
 
-When `PAUSED`, the bot continues running (loop keeps ticking) but skips all order execution. Re-enabling requires manually setting `status = 'RUNNING'` in the database after reviewing the situation.
-
----
-
-## Quickstart
-
-### Prerequisites
-- Python 3.11+
-- Coinbase Advanced Trade API key with **View** and **Trade** scopes
-
-### Setup
-
-```bash
-git clone https://github.com/bxxb11/PRD-Coinbase-Algo-Trading.git
-cd PRD-Coinbase-Algo-Trading
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-Edit `.env` — at minimum set your API credentials and mode:
-
-```env
-PAPER_TRADING=True          # keep True until you're ready for real money
-COINBASE_API_KEY=your_key
-COINBASE_API_SECRET=your_secret
-```
-
-### Run
-
-```bash
-python main.py
-```
-
-The bot prints a startup banner and begins ticking immediately:
-
-```
-============================================================
-Coinbase Algo Trading Bot — PAPER MODE
-Pair:       BTC/USD
-Timeframe:  1h  |  MA20/MA50
-Trade size: $1.0–$20.0 (spread-sized)
-Max pos:    $200.0  |  Max drawdown: 25.0%
-============================================================
-Tick #0: HOLD | MA20=70093.13 MA50=70183.04 | price=$69,423.80
-```
-
-Stop with `Ctrl+C` — shuts down cleanly and closes the database.
-
----
-
-## Configuration Reference
-
-All settings live in `.env`. Copy `.env.example` to get started.
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `PAPER_TRADING` | `True` | `True` = simulate only. `False` = real orders. |
-| `COINBASE_API_KEY` | — | Required when `PAPER_TRADING=False` |
-| `COINBASE_API_SECRET` | — | Required when `PAPER_TRADING=False` |
-| `TRADING_PAIR` | `BTC/USD` | Market to trade |
-| `TIMEFRAME` | `1h` | OHLCV candle timeframe |
-| `MA_SHORT_PERIOD` | `20` | Short moving average window |
-| `MA_LONG_PERIOD` | `50` | Long moving average window |
-| `CANDLES_REQUIRED` | `100` | OHLCV history to fetch per tick |
-| `LOOP_INTERVAL_SECONDS` | `3600` | Seconds between ticks (3600 = 1 hour) |
-| `MIN_TRADE_SIZE_USD` | `1.0` | Minimum trade size (weak signal) |
-| `MAX_TRADE_SIZE_USD` | `20.0` | Maximum trade size (strong signal) |
-| `SIZE_SPREAD_MIN_PCT` | `0.1` | MA spread % that maps to `MIN_TRADE_SIZE_USD` |
-| `SIZE_SPREAD_MAX_PCT` | `0.5` | MA spread % that maps to `MAX_TRADE_SIZE_USD` |
-| `MAX_POSITION_USD` | `200.0` | Hard cap on total open position |
-| `MAX_DRAWDOWN_PERCENT` | `25.0` | Drawdown % that triggers PAUSED state |
-| `INITIAL_EQUITY_USD` | `1000.0` | Starting equity (paper mode baseline) |
-| `DB_PATH` | `state/trading.db` | SQLite database path |
-| `LOG_DIR` | `logs/` | Directory for log files |
-| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`) |
+When `PAUSED`, the loop keeps ticking but skips all order execution. Re-enable by setting `status = 'RUNNING'` in the database after reviewing the situation.
 
 ---
 
 ## Monitoring
 
-### Watch logs live
-
+### Local (Windows)
 ```powershell
-# Windows PowerShell
 Get-Content -Wait "logs\system.log"
 ```
 
+### Local (macOS / Linux) or GCP VM
 ```bash
-# macOS / Linux
 tail -f logs/system.log
+
+# On GCP VM — systemd journal (richer output)
+journalctl -u coinbase-bot -f
 ```
 
 ### Check bot state
-
 ```bash
-sqlite3 state/trading.db "SELECT * FROM bot_state;"
+sqlite3 state/trading.db "SELECT status, current_equity_usd, position_usd, last_signal FROM bot_state;"
 ```
 
 ### View trade history
-
 ```bash
-sqlite3 state/trading.db "SELECT side, size_usd, fill_price, mode, status, created_at FROM trades ORDER BY created_at DESC LIMIT 20;"
+sqlite3 state/trading.db \
+  "SELECT side, size_usd, fill_price, mode, status, created_at FROM trades ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ### Log files
 
 | File | Contents |
 |------|----------|
-| `logs/system.log` | Every tick result — HOLD, signal detected, order outcome |
+| `logs/system.log` | Every tick — HOLD, signal detected, order outcome, next tick time |
 | `logs/trades.log` | Order fills only — side, size, price, fee, order ID |
 | `logs/risk.log` | Drawdown checks, warnings, PAUSED transitions |
 
@@ -225,7 +313,7 @@ All logs rotate at 10 MB, keeping 5 backups.
 | Version | Status | Scope |
 |---------|--------|-------|
 | **v1** | ✅ Complete | Stable loop, MA crossover strategy, risk controls, paper + live trading |
-| **v2** | Planned | Backtesting on historical data — Sharpe ratio, max drawdown, win rate |
+| **v2** | ✅ Complete | Backtesting engine, MACD + EMA+RSI strategies, parameter sweep, GCP deployment, scheduled ticks |
 | **v3** | Future | AI-generated strategies using Claude API |
 
 ---
