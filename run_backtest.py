@@ -316,7 +316,7 @@ def main() -> None:
             save_trade_log_csv(best.result, str(out / "sweep_best_trades.csv"))
             if args.html:
                 save_html_report(best.result, str(out / "report.html"),
-                                 strategy_name=args.strategy)
+                                 strategy_name=args.strategy, df=df)
             print(f"[run_backtest] Best params: {best.params}")
             print_summary(best.result, strategy_name=args.strategy)
 
@@ -338,7 +338,7 @@ def main() -> None:
         save_trade_log_csv(result, str(out / "trade_log.csv"))
         if args.html:
             save_html_report(result, str(out / "report.html"),
-                             strategy_name=args.strategy)
+                             strategy_name=args.strategy, df=df)
 
 
 if __name__ == "__main__":

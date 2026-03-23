@@ -162,16 +162,22 @@ def save_html_report(
     result: BacktestResult,
     output_path: str,
     strategy_name: str = "",
+    df: Optional[pd.DataFrame] = None,
 ) -> None:
     """
     Write a self-contained interactive HTML report to output_path.
 
     Contains:
       - Six summary metric cards (return, profit factor, Sharpe, drawdown, win rate, trades)
-      - Interactive equity curve chart (Plotly.js via CDN)
+      - Interactive equity curve chart with BTC price overlay (Plotly.js via CDN)
       - Interactive drawdown chart
       - Full colour-coded trade log table
       - Run info footer (strategy, params, period, generated timestamp)
+
+    Args:
+        df: Optional OHLCV DataFrame. When provided, BTC price is plotted as
+            a secondary axis on the equity chart so you can see how portfolio
+            value moves relative to BTC price.
 
     No extra Python dependencies — Plotly.js is loaded from CDN.
     """
@@ -205,6 +211,25 @@ def save_html_report(
     eq_ts  = [str(ts)[:19] for ts in result.equity_timestamps]
     eq_val = [round(v, 2) for v in result.equity_curve]
 
+    # ── BTC price overlay (aligned to equity timestamps via dict lookup) ─────
+    if df is not None and "close" in df.columns and "timestamp" in df.columns:
+        ts_to_price = {
+            str(ts)[:19]: round(float(p), 2)
+            for ts, p in zip(df["timestamp"], df["close"])
+        }
+        btc_prices = [ts_to_price.get(ts, None) for ts in eq_ts]
+        # Fill forward any gaps (timestamps with no matching bar)
+        last_known: Optional[float] = None
+        for idx, p in enumerate(btc_prices):
+            if p is not None:
+                last_known = p
+            elif last_known is not None:
+                btc_prices[idx] = last_known
+        has_btc = any(p is not None for p in btc_prices)
+    else:
+        btc_prices = []
+        has_btc = False
+
     # ── Drawdown series (running peak → trough %) ────────────────────────────
     dd_series: list[float] = []
     running_peak = float("-inf")
@@ -216,11 +241,11 @@ def save_html_report(
     trade_rows_html = ""
     for t in result.trades:
         row_class = "buy-row" if t.side == "BUY" else "sell-row"
+        badge_class = "badge-buy" if t.side == "BUY" else "badge-sell"
         trade_rows_html += (
             f'<tr class="{row_class}">'
             f"<td>{str(t.timestamp)[:19]}</td>"
-            f'<td><span class="badge {"badge-buy" if t.side == "BUY" else "badge-sell"}">'
-            f"{t.side}</span></td>"
+            f'<td><span class="badge {badge_class}">{t.side}</span></td>'
             f"<td>${t.size_usd:.2f}</td>"
             f"<td>${t.fill_price:,.2f}</td>"
             f"<td>${t.fee_usd:.2f}</td>"
@@ -230,9 +255,13 @@ def save_html_report(
         )
 
     if not trade_rows_html:
-        trade_rows_html = '<tr><td colspan="7" style="text-align:center;color:#888;">No trades executed</td></tr>'
+        trade_rows_html = (
+            '<tr><td colspan="7" style="text-align:center;color:#888;">'
+            "No trades executed</td></tr>"
+        )
 
     generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    right_margin = 90 if has_btc else 20
 
     # ── Assemble HTML ────────────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
@@ -265,14 +294,15 @@ def save_html_report(
   .chart-box {{ background: #fff; border-radius: 12px;
                 box-shadow: 0 2px 8px rgba(0,0,0,.08);
                 padding: 20px; margin-bottom: 24px; }}
-  .chart-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 12px;
-                   color: #444; }}
+  .chart-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 4px; color: #444; }}
+  .chart-box .subtitle {{ font-size: 0.78rem; color: #999; margin-bottom: 12px; }}
 
   /* ── Trade table ── */
   .table-box {{ background: #fff; border-radius: 12px;
                 box-shadow: 0 2px 8px rgba(0,0,0,.08);
                 padding: 20px; margin-bottom: 24px; overflow-x: auto; }}
-  .table-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 14px; color: #444; }}
+  .table-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 6px; color: #444; }}
+  .table-box .subtitle {{ font-size: 0.78rem; color: #999; margin-bottom: 12px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 0.875rem; }}
   th {{ background: #f7f8fa; padding: 10px 12px; text-align: left;
         font-weight: 600; color: #555; border-bottom: 2px solid #e8e8e8; }}
@@ -327,27 +357,33 @@ def save_html_report(
     </div>
   </div>
 
-  <!-- Equity curve -->
+  <!-- Equity curve + BTC price overlay -->
   <div class="chart-box">
-    <h2>Equity Curve</h2>
-    <div id="equity-chart" style="height:360px;"></div>
+    <h2>Portfolio Value (mark-to-market)</h2>
+    <p class="subtitle">Blue = total account value (cash + BTC valued at current price) &nbsp;·&nbsp; Orange dotted = BTC/USD price (right axis)</p>
+    <div id="equity-chart" style="height:380px;"></div>
   </div>
 
   <!-- Drawdown chart -->
   <div class="chart-box">
     <h2>Drawdown (%)</h2>
+    <p class="subtitle">How far the portfolio fell from its peak at each point in time. Deeper = worse.</p>
     <div id="dd-chart" style="height:240px;"></div>
   </div>
 
   <!-- Trade log -->
   <div class="table-box">
-    <h2>Trade Log &nbsp;<span style="font-weight:400;color:#999;font-size:.85rem;">({m.total_trades} executed trades)</span></h2>
+    <h2>Trade Log &nbsp;<span style="font-weight:400;color:#999;font-size:.85rem;">({m.total_trades} executed)</span></h2>
+    <p class="subtitle">
+      <strong>Equity After</strong> = total portfolio value (cash + BTC at fill price) after this trade &nbsp;·&nbsp;
+      <strong>BTC on Hand ($)</strong> = cost basis of BTC currently held (not mark-to-market)
+    </p>
     <div style="max-height:420px;overflow-y:auto;">
       <table>
         <thead>
           <tr>
             <th>Date</th><th>Side</th><th>Size USD</th>
-            <th>Fill Price</th><th>Fee</th><th>Equity After</th><th>Position</th>
+            <th>Fill Price</th><th>Fee</th><th>Equity After</th><th>BTC on Hand ($)</th>
           </tr>
         </thead>
         <tbody>
@@ -369,35 +405,69 @@ def save_html_report(
 
 <script>
 (function() {{
-  var eqTs  = {json.dumps(eq_ts)};
-  var eqVal = {json.dumps(eq_val)};
+  var eqTs     = {json.dumps(eq_ts)};
+  var eqVal    = {json.dumps(eq_val)};
   var ddSeries = {json.dumps(dd_series)};
-  var initEq = {result.initial_equity};
+  var btcPrices = {json.dumps(btc_prices)};
+  var hasBtc   = {json.dumps(has_btc)};
+  var initEq   = {result.initial_equity};
 
-  // ── Equity curve ──────────────────────────────────────────────────────────
-  Plotly.newPlot('equity-chart', [
+  // ── Equity curve + optional BTC price overlay ─────────────────────────────
+  var traces = [
     {{
       x: eqTs, y: eqVal,
       type: 'scatter', mode: 'lines',
-      line: {{color: '#2980b9', width: 2}},
-      name: 'Equity',
-      hovertemplate: '%{{x}}<br><b>$%{{y:,.2f}}</b><extra></extra>'
+      line: {{color: '#2980b9', width: 2.5}},
+      name: 'Portfolio Value',
+      yaxis: 'y',
+      hovertemplate: '%{{x}}<br>Portfolio: <b>${{%{{y:,.2f}}}}</b><extra></extra>'
     }},
     {{
       x: [eqTs[0], eqTs[eqTs.length-1]],
       y: [initEq, initEq],
       type: 'scatter', mode: 'lines',
-      line: {{color: '#aaa', width: 1, dash: 'dash'}},
-      name: 'Starting equity',
+      line: {{color: '#bbb', width: 1, dash: 'dash'}},
+      name: 'Starting $' + initEq.toLocaleString(),
+      yaxis: 'y',
       hoverinfo: 'skip'
     }}
-  ], {{
-    margin: {{t: 10, r: 20, b: 40, l: 70}},
+  ];
+
+  var layout = {{
+    margin: {{t: 10, r: {right_margin}, b: 40, l: 80}},
     xaxis: {{showgrid: false, zeroline: false}},
-    yaxis: {{title: 'Equity (USD)', tickprefix: '$', gridcolor: '#f0f0f0'}},
+    yaxis: {{
+      title: 'Portfolio Value (USD)',
+      tickprefix: '$',
+      gridcolor: '#f0f0f0',
+      zeroline: false
+    }},
     paper_bgcolor: 'white', plot_bgcolor: 'white',
-    showlegend: true, legend: {{x: 0, y: 1}}
-  }}, {{responsive: true, displayModeBar: false}});
+    showlegend: true,
+    legend: {{x: 0.01, y: 0.99, bgcolor: 'rgba(255,255,255,0.8)', bordercolor: '#ddd', borderwidth: 1}}
+  }};
+
+  if (hasBtc) {{
+    traces.push({{
+      x: eqTs, y: btcPrices,
+      type: 'scatter', mode: 'lines',
+      line: {{color: '#e67e22', width: 1.5, dash: 'dot'}},
+      name: 'BTC/USD',
+      yaxis: 'y2',
+      opacity: 0.8,
+      hovertemplate: '%{{x}}<br>BTC: <b>${{%{{y:,.0f}}}}</b><extra></extra>'
+    }});
+    layout.yaxis2 = {{
+      title: 'BTC Price (USD)',
+      overlaying: 'y',
+      side: 'right',
+      tickprefix: '$',
+      showgrid: false,
+      zeroline: false
+    }};
+  }}
+
+  Plotly.newPlot('equity-chart', traces, layout, {{responsive: true, displayModeBar: false}});
 
   // ── Drawdown chart ────────────────────────────────────────────────────────
   Plotly.newPlot('dd-chart', [
@@ -413,7 +483,7 @@ def save_html_report(
   ], {{
     margin: {{t: 10, r: 20, b: 40, l: 60}},
     xaxis: {{showgrid: false, zeroline: false}},
-    yaxis: {{title: 'Drawdown (%)', ticksuffix: '%', gridcolor: '#f0f0f0'}},
+    yaxis: {{title: 'Drawdown (%)', ticksuffix: '%', gridcolor: '#f0f0f0', zeroline: false}},
     paper_bgcolor: 'white', plot_bgcolor: 'white',
     showlegend: false
   }}, {{responsive: true, displayModeBar: false}});

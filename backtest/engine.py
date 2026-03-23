@@ -165,6 +165,14 @@ class BacktestEngine:
             current_ts = row["timestamp"]
             signal: Signal = signal_series.iloc[i]
 
+            # ── Mark-to-market: re-price held BTC at this bar's close ──────
+            # Total portfolio value = cash + BTC_qty × close_price
+            # This means the equity curve reflects real P&L as BTC moves,
+            # not just fee deductions.
+            mtm = round(state["cash_usd"] + state["position_qty"] * current_price, 2)
+            state = {**state, "current_equity_usd": mtm}
+            state = update_peak_equity(state)
+
             # HOLD path
             if signal == Signal.HOLD:
                 equity_curve.append(state["current_equity_usd"])
@@ -225,6 +233,9 @@ class BacktestEngine:
             else:
                 state = apply_sell(state, size_usd, size_qty, self._fee_rate)
 
+            # Post-trade MTM (cash changed but price unchanged within same bar)
+            mtm = round(state["cash_usd"] + state["position_qty"] * current_price, 2)
+            state = {**state, "current_equity_usd": mtm}
             state = update_peak_equity(state)
 
             trades.append(TradeRecord(
