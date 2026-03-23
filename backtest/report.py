@@ -1,12 +1,14 @@
 """
 Output formatting for backtest results.
-Console summary, sweep tables, and CSV file export.
+Console summary, sweep tables, CSV file export, and interactive HTML reports.
 No business logic — presentation only.
 """
 
 from __future__ import annotations
 
 import csv
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -154,6 +156,274 @@ def _fmt_ts(ts) -> str:
         return str(ts)[:10]
     except Exception:
         return str(ts)
+
+
+def save_html_report(
+    result: BacktestResult,
+    output_path: str,
+    strategy_name: str = "",
+) -> None:
+    """
+    Write a self-contained interactive HTML report to output_path.
+
+    Contains:
+      - Six summary metric cards (return, profit factor, Sharpe, drawdown, win rate, trades)
+      - Interactive equity curve chart (Plotly.js via CDN)
+      - Interactive drawdown chart
+      - Full colour-coded trade log table
+      - Run info footer (strategy, params, period, generated timestamp)
+
+    No extra Python dependencies — Plotly.js is loaded from CDN.
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    m = result.metrics
+    params_str = _format_params(result.params)
+    label = f"{strategy_name} {params_str}".strip()
+
+    ts_start = _fmt_ts(result.equity_timestamps[0]) if result.equity_timestamps else "—"
+    ts_end   = _fmt_ts(result.equity_timestamps[-1]) if result.equity_timestamps else "—"
+
+    # ── Metric card values ───────────────────────────────────────────────────
+    ret_pct    = m.total_return_pct
+    ret_str    = f"{'+' if ret_pct >= 0 else ''}{ret_pct:.2f}%"
+    ret_colour = "#27ae60" if ret_pct >= 0 else "#e74c3c"
+
+    pf_val  = m.profit_factor
+    pf_str  = "∞" if pf_val == float("inf") else f"{pf_val:.2f}"
+    pf_colour = "#27ae60" if pf_val >= 1.0 else "#e74c3c"
+
+    sharpe_str = f"{m.sharpe_ratio:.2f}" if m.sharpe_ratio is not None else "N/A"
+    sharpe_colour = "#27ae60" if (m.sharpe_ratio or 0) >= 0 else "#e74c3c"
+
+    dd_str    = f"-{m.max_drawdown_pct:.2f}%"
+    wr_str    = f"{m.win_rate_pct:.1f}%"
+    wr_colour = "#27ae60" if m.win_rate_pct >= 50 else "#e74c3c"
+
+    # ── Equity curve data ────────────────────────────────────────────────────
+    eq_ts  = [str(ts)[:19] for ts in result.equity_timestamps]
+    eq_val = [round(v, 2) for v in result.equity_curve]
+
+    # ── Drawdown series (running peak → trough %) ────────────────────────────
+    dd_series: list[float] = []
+    running_peak = float("-inf")
+    for eq in result.equity_curve:
+        running_peak = max(running_peak, eq)
+        dd_series.append(round((eq - running_peak) / running_peak * 100, 4))
+
+    # ── Trade table rows ─────────────────────────────────────────────────────
+    trade_rows_html = ""
+    for t in result.trades:
+        row_class = "buy-row" if t.side == "BUY" else "sell-row"
+        trade_rows_html += (
+            f'<tr class="{row_class}">'
+            f"<td>{str(t.timestamp)[:19]}</td>"
+            f'<td><span class="badge {"badge-buy" if t.side == "BUY" else "badge-sell"}">'
+            f"{t.side}</span></td>"
+            f"<td>${t.size_usd:.2f}</td>"
+            f"<td>${t.fill_price:,.2f}</td>"
+            f"<td>${t.fee_usd:.2f}</td>"
+            f"<td>${t.equity_after:,.2f}</td>"
+            f"<td>${t.position_usd_after:.2f}</td>"
+            f"</tr>\n"
+        )
+
+    if not trade_rows_html:
+        trade_rows_html = '<tr><td colspan="7" style="text-align:center;color:#888;">No trades executed</td></tr>'
+
+    generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    # ── Assemble HTML ────────────────────────────────────────────────────────
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backtest Report — {label}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          background: #f0f2f5; color: #1a1a2e; }}
+  header {{ background: #1a1a2e; color: #fff; padding: 24px 32px; }}
+  header h1 {{ font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }}
+  header p  {{ font-size: 0.85rem; color: #aab; }}
+  .container {{ max-width: 1200px; margin: 0 auto; padding: 24px 20px; }}
+
+  /* ── Metric cards ── */
+  .cards {{ display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 16px; margin-bottom: 28px; }}
+  @media (max-width: 700px) {{ .cards {{ grid-template-columns: repeat(2, 1fr); }} }}
+  .card {{ background: #fff; border-radius: 12px; padding: 20px 24px;
+           box-shadow: 0 2px 8px rgba(0,0,0,.08); }}
+  .card .label {{ font-size: 0.78rem; color: #888; text-transform: uppercase;
+                  letter-spacing: .06em; margin-bottom: 8px; }}
+  .card .value {{ font-size: 1.9rem; font-weight: 700; }}
+
+  /* ── Charts ── */
+  .chart-box {{ background: #fff; border-radius: 12px;
+                box-shadow: 0 2px 8px rgba(0,0,0,.08);
+                padding: 20px; margin-bottom: 24px; }}
+  .chart-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 12px;
+                   color: #444; }}
+
+  /* ── Trade table ── */
+  .table-box {{ background: #fff; border-radius: 12px;
+                box-shadow: 0 2px 8px rgba(0,0,0,.08);
+                padding: 20px; margin-bottom: 24px; overflow-x: auto; }}
+  .table-box h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: 14px; color: #444; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.875rem; }}
+  th {{ background: #f7f8fa; padding: 10px 12px; text-align: left;
+        font-weight: 600; color: #555; border-bottom: 2px solid #e8e8e8; }}
+  td {{ padding: 9px 12px; border-bottom: 1px solid #f0f0f0; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .buy-row  {{ background: #f0faf4; }}
+  .sell-row {{ background: #fff5f5; }}
+  .badge {{ display: inline-block; padding: 2px 10px; border-radius: 20px;
+             font-size: 0.78rem; font-weight: 700; }}
+  .badge-buy  {{ background: #d4f0de; color: #1a7a3e; }}
+  .badge-sell {{ background: #fddede; color: #b71c1c; }}
+
+  /* ── Footer ── */
+  footer {{ text-align: center; font-size: 0.78rem; color: #999;
+            padding: 20px; margin-top: 8px; }}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Backtest Report — {label}</h1>
+  <p>BTC/USD &nbsp;·&nbsp; 1h bars &nbsp;·&nbsp; {ts_start} → {ts_end}</p>
+</header>
+
+<div class="container">
+
+  <!-- Metric cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">Total Return</div>
+      <div class="value" style="color:{ret_colour}">{ret_str}</div>
+    </div>
+    <div class="card">
+      <div class="label">Profit Factor</div>
+      <div class="value" style="color:{pf_colour}">{pf_str}</div>
+    </div>
+    <div class="card">
+      <div class="label">Sharpe Ratio</div>
+      <div class="value" style="color:{sharpe_colour}">{sharpe_str}</div>
+    </div>
+    <div class="card">
+      <div class="label">Max Drawdown</div>
+      <div class="value" style="color:#e74c3c">{dd_str}</div>
+    </div>
+    <div class="card">
+      <div class="label">Win Rate</div>
+      <div class="value" style="color:{wr_colour}">{wr_str}</div>
+    </div>
+    <div class="card">
+      <div class="label">Total Trades</div>
+      <div class="value" style="color:#2980b9">{m.total_trades}</div>
+    </div>
+  </div>
+
+  <!-- Equity curve -->
+  <div class="chart-box">
+    <h2>Equity Curve</h2>
+    <div id="equity-chart" style="height:360px;"></div>
+  </div>
+
+  <!-- Drawdown chart -->
+  <div class="chart-box">
+    <h2>Drawdown (%)</h2>
+    <div id="dd-chart" style="height:240px;"></div>
+  </div>
+
+  <!-- Trade log -->
+  <div class="table-box">
+    <h2>Trade Log &nbsp;<span style="font-weight:400;color:#999;font-size:.85rem;">({m.total_trades} executed trades)</span></h2>
+    <div style="max-height:420px;overflow-y:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th><th>Side</th><th>Size USD</th>
+            <th>Fill Price</th><th>Fee</th><th>Equity After</th><th>Position</th>
+          </tr>
+        </thead>
+        <tbody>
+{trade_rows_html}        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<footer>
+  Strategy: <strong>{label}</strong> &nbsp;·&nbsp;
+  Initial equity: <strong>${result.initial_equity:,.0f}</strong> &nbsp;·&nbsp;
+  Final equity: <strong>${result.final_equity:,.2f}</strong> &nbsp;·&nbsp;
+  Net PnL: <strong>${m.net_pnl_usd:+,.2f}</strong> &nbsp;·&nbsp;
+  Fees paid: <strong>${m.total_fees_usd:,.2f}</strong><br>
+  <span style="margin-top:6px;display:inline-block;">Generated {generated_at}</span>
+</footer>
+
+<script>
+(function() {{
+  var eqTs  = {json.dumps(eq_ts)};
+  var eqVal = {json.dumps(eq_val)};
+  var ddSeries = {json.dumps(dd_series)};
+  var initEq = {result.initial_equity};
+
+  // ── Equity curve ──────────────────────────────────────────────────────────
+  Plotly.newPlot('equity-chart', [
+    {{
+      x: eqTs, y: eqVal,
+      type: 'scatter', mode: 'lines',
+      line: {{color: '#2980b9', width: 2}},
+      name: 'Equity',
+      hovertemplate: '%{{x}}<br><b>$%{{y:,.2f}}</b><extra></extra>'
+    }},
+    {{
+      x: [eqTs[0], eqTs[eqTs.length-1]],
+      y: [initEq, initEq],
+      type: 'scatter', mode: 'lines',
+      line: {{color: '#aaa', width: 1, dash: 'dash'}},
+      name: 'Starting equity',
+      hoverinfo: 'skip'
+    }}
+  ], {{
+    margin: {{t: 10, r: 20, b: 40, l: 70}},
+    xaxis: {{showgrid: false, zeroline: false}},
+    yaxis: {{title: 'Equity (USD)', tickprefix: '$', gridcolor: '#f0f0f0'}},
+    paper_bgcolor: 'white', plot_bgcolor: 'white',
+    showlegend: true, legend: {{x: 0, y: 1}}
+  }}, {{responsive: true, displayModeBar: false}});
+
+  // ── Drawdown chart ────────────────────────────────────────────────────────
+  Plotly.newPlot('dd-chart', [
+    {{
+      x: eqTs, y: ddSeries,
+      type: 'scatter', mode: 'lines',
+      fill: 'tozeroy',
+      line: {{color: '#e74c3c', width: 1.5}},
+      fillcolor: 'rgba(231,76,60,0.15)',
+      name: 'Drawdown %',
+      hovertemplate: '%{{x}}<br><b>%{{y:.2f}}%</b><extra></extra>'
+    }}
+  ], {{
+    margin: {{t: 10, r: 20, b: 40, l: 60}},
+    xaxis: {{showgrid: false, zeroline: false}},
+    yaxis: {{title: 'Drawdown (%)', ticksuffix: '%', gridcolor: '#f0f0f0'}},
+    paper_bgcolor: 'white', plot_bgcolor: 'white',
+    showlegend: false
+  }}, {{responsive: true, displayModeBar: false}});
+}})();
+</script>
+</body>
+</html>"""
+
+    path.write_text(html, encoding="utf-8")
+    print(f"[report] HTML report saved → {path}")
 
 
 def _format_params(params: dict) -> str:

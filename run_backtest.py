@@ -49,6 +49,7 @@ from backtest.report import (
     print_sweep_table,
     save_equity_curve_csv,
     save_trade_log_csv,
+    save_html_report,
 )
 
 
@@ -130,6 +131,8 @@ def parse_args() -> argparse.Namespace:
     # Output
     p.add_argument("--out-dir", default=None,
                    help="Directory to save CSV outputs (equity curve + trade log)")
+    p.add_argument("--html", action="store_true",
+                   help="Save interactive HTML report to --out-dir/report.html (requires --out-dir)")
     p.add_argument("--top", type=int, default=20,
                    help="Number of sweep results to show (default: 20)")
 
@@ -308,8 +311,12 @@ def main() -> None:
             # Save best result's details
             best = sweep_results[0]
             out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
             save_equity_curve_csv(best.result, str(out / "sweep_best_equity.csv"))
             save_trade_log_csv(best.result, str(out / "sweep_best_trades.csv"))
+            if args.html:
+                save_html_report(best.result, str(out / "report.html"),
+                                 strategy_name=args.strategy)
             print(f"[run_backtest] Best params: {best.params}")
             print_summary(best.result, strategy_name=args.strategy)
 
@@ -326,8 +333,12 @@ def main() -> None:
 
     if args.out_dir:
         out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
         save_equity_curve_csv(result, str(out / "equity_curve.csv"))
         save_trade_log_csv(result, str(out / "trade_log.csv"))
+        if args.html:
+            save_html_report(result, str(out / "report.html"),
+                             strategy_name=args.strategy)
 
 
 if __name__ == "__main__":
