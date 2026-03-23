@@ -262,6 +262,146 @@ def generate_ema_rsi_signal(
     return Signal.HOLD
 
 
+# ── SuperTrend ────────────────────────────────────────────────────────────────
+
+def generate_supertrend_signal(
+    df: pd.DataFrame,
+    atr_period: int = 10,
+    atr_multiplier: float = 3.0,
+) -> Signal:
+    """
+    SuperTrend trend-flip signal (aggressive — no pullback wait).
+
+    BUY:  SuperTrend flips bearish → bullish on current bar
+    SELL: SuperTrend flips bullish → bearish on current bar
+    HOLD: trend unchanged or insufficient data
+
+    The ratcheting band logic is O(n) single pass over the input df.
+    Minimum bars: atr_period + 2
+    """
+    min_bars = atr_period + 2
+    if len(df) < min_bars:
+        return Signal.HOLD
+
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1.0 / atr_period, adjust=False).mean()
+    hl2 = (df["high"] + df["low"]) / 2.0
+
+    basic_upper = (hl2 + atr_multiplier * atr).to_numpy()
+    basic_lower = (hl2 - atr_multiplier * atr).to_numpy()
+    close_arr   = df["close"].to_numpy()
+
+    n = len(df)
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    supertrend  = [0] * n
+
+    for i in range(1, n):
+        if basic_upper[i] < final_upper[i - 1] or close_arr[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+
+        if basic_lower[i] > final_lower[i - 1] or close_arr[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+
+        prev_st = supertrend[i - 1] if supertrend[i - 1] != 0 else 1
+        if prev_st == 1:
+            supertrend[i] = -1 if close_arr[i] < final_lower[i] else 1
+        else:
+            supertrend[i] =  1 if close_arr[i] > final_upper[i] else -1
+
+    if supertrend[-1] == 0 or supertrend[-2] == 0:
+        return Signal.HOLD
+    if supertrend[-2] == -1 and supertrend[-1] == 1:
+        return Signal.BUY
+    if supertrend[-2] == 1 and supertrend[-1] == -1:
+        return Signal.SELL
+    return Signal.HOLD
+
+
+# ── Donchian Channel + ADX ────────────────────────────────────────────────────
+
+def _compute_adx(df: pd.DataFrame, period: int) -> pd.Series:
+    """Wilder-smoothed ADX. Pure pandas, no TA-Lib."""
+    alpha      = 1.0 / period
+    prev_high  = df["high"].shift(1)
+    prev_low   = df["low"].shift(1)
+    prev_close = df["close"].shift(1)
+
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    h_diff   = df["high"] - prev_high
+    l_diff   = prev_low   - df["low"]
+    plus_dm  = h_diff.where((h_diff > l_diff) & (h_diff > 0), 0.0)
+    minus_dm = l_diff.where((l_diff > h_diff) & (l_diff > 0), 0.0)
+
+    smooth_tr    = tr.ewm(alpha=alpha, adjust=False).mean()
+    smooth_plus  = plus_dm.ewm(alpha=alpha, adjust=False).mean()
+    smooth_minus = minus_dm.ewm(alpha=alpha, adjust=False).mean()
+
+    tr_safe  = smooth_tr.replace(0, float("nan"))
+    plus_di  = 100.0 * smooth_plus  / tr_safe
+    minus_di = 100.0 * smooth_minus / tr_safe
+    di_sum   = (plus_di + minus_di).replace(0, float("nan"))
+    dx       = 100.0 * (plus_di - minus_di).abs() / di_sum
+    return dx.ewm(alpha=alpha, adjust=False).mean()
+
+
+def generate_donchian_adx_signal(
+    df: pd.DataFrame,
+    dc_enter_bars: int = 20,
+    dc_exit_bars: int = 10,
+    adx_period: int = 14,
+    adx_threshold: float = 25.0,
+) -> Signal:
+    """
+    Donchian Channel Breakout with ADX consolidation filter.
+
+    BUY:  close > highest close of prior dc_enter_bars bars
+          AND ADX < adx_threshold  (breakout from consolidation)
+    SELL: close < lowest close of prior dc_exit_bars bars
+    HOLD: no breakout, or ADX too high (already trending = chasing)
+
+    Shift(1) on channels prevents lookahead bias.
+    Minimum bars: dc_enter_bars + adx_period + 2
+    """
+    min_bars = dc_enter_bars + adx_period + 2
+    if len(df) < min_bars:
+        return Signal.HOLD
+
+    close = df["close"]
+    dc_high = close.shift(1).rolling(window=dc_enter_bars).max()
+    dc_low  = close.shift(1).rolling(window=dc_exit_bars).min()
+    adx     = _compute_adx(df, adx_period)
+
+    curr_close = close.iloc[-1]
+    curr_high  = dc_high.iloc[-1]
+    curr_low   = dc_low.iloc[-1]
+    curr_adx   = adx.iloc[-1]
+
+    if pd.isna(curr_high) or pd.isna(curr_low) or pd.isna(curr_adx):
+        return Signal.HOLD
+
+    if curr_close > curr_high and curr_adx < adx_threshold:
+        return Signal.BUY
+    if curr_close < curr_low:
+        return Signal.SELL
+    return Signal.HOLD
+
+
 # ── Strategy dispatcher ───────────────────────────────────────────────────────
 
 def dispatch_strategy(df: pd.DataFrame, config) -> Signal:
@@ -294,6 +434,22 @@ def dispatch_strategy(df: pd.DataFrame, config) -> Signal:
             rsi_buy_thresh=getattr(config, "rsi_buy_thresh", 45.0),
             rsi_sell_thresh=getattr(config, "rsi_sell_thresh", 55.0),
             trend_confirm_bars=getattr(config, "trend_confirm_bars", 3),
+        )
+
+    if name == "supertrend":
+        return generate_supertrend_signal(
+            df,
+            atr_period=getattr(config, "atr_period", 10),
+            atr_multiplier=getattr(config, "atr_multiplier", 3.0),
+        )
+
+    if name == "donchian_adx":
+        return generate_donchian_adx_signal(
+            df,
+            dc_enter_bars=getattr(config, "dc_enter_bars", 20),
+            dc_exit_bars=getattr(config, "dc_exit_bars", 10),
+            adx_period=getattr(config, "adx_period", 14),
+            adx_threshold=getattr(config, "adx_threshold", 25.0),
         )
 
     # Default: ma_crossover

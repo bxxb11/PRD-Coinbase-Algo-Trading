@@ -103,6 +103,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rsi-sell", type=float, default=None,
                    help="RSI sell threshold (default: 55)")
 
+    # SuperTrend params
+    p.add_argument("--atr-period", type=int, nargs="+", default=None,
+                   help="SuperTrend ATR period(s)")
+    p.add_argument("--atr-multiplier", type=float, nargs="+", default=None,
+                   help="SuperTrend ATR multiplier(s)")
+
+    # Donchian + ADX params
+    p.add_argument("--dc-enter-bars", type=int, nargs="+", default=None,
+                   help="Donchian entry channel period(s)")
+    p.add_argument("--dc-exit-bars", type=int, nargs="+", default=None,
+                   help="Donchian exit channel period(s)")
+    p.add_argument("--adx-period", type=int, nargs="+", default=None,
+                   help="ADX smoothing period(s)")
+    p.add_argument("--adx-threshold", type=float, nargs="+", default=None,
+                   help="ADX consolidation threshold(s) (default: 25)")
+
     # Engine config
     p.add_argument("--initial", type=float, default=1000.0,
                    help="Initial equity USD (default: 1000)")
@@ -181,6 +197,22 @@ def _build_params(args) -> dict:
         if args.rsi_sell is not None:
             params["rsi_sell_thresh"] = args.rsi_sell
 
+    elif strategy == "supertrend":
+        if args.atr_period and not args.sweep:
+            params["atr_period"] = args.atr_period[0]
+        if args.atr_multiplier and not args.sweep:
+            params["atr_multiplier"] = args.atr_multiplier[0]
+
+    elif strategy == "donchian_adx":
+        if args.dc_enter_bars and not args.sweep:
+            params["dc_enter_bars"] = args.dc_enter_bars[0]
+        if args.dc_exit_bars and not args.sweep:
+            params["dc_exit_bars"] = args.dc_exit_bars[0]
+        if args.adx_period and not args.sweep:
+            params["adx_period"] = args.adx_period[0]
+        if args.adx_threshold and not args.sweep:
+            params["adx_threshold"] = args.adx_threshold[0]
+
     return params
 
 
@@ -217,6 +249,24 @@ def _build_param_grid(args) -> dict:
             grid["rsi_period"] = args.rsi_period
         if not grid:
             grid = {"ema_short": [13, 21], "ema_long": [34, 55], "rsi_period": [14]}
+
+    elif strategy == "supertrend":
+        if args.atr_period:
+            grid["atr_period"] = args.atr_period
+        if args.atr_multiplier:
+            grid["atr_multiplier"] = args.atr_multiplier
+        if not grid:
+            grid = {"atr_period": [7, 10, 14], "atr_multiplier": [2.0, 2.5, 3.0, 3.5]}
+
+    elif strategy == "donchian_adx":
+        if args.dc_enter_bars:
+            grid["dc_enter_bars"] = args.dc_enter_bars
+        if args.dc_exit_bars:
+            grid["dc_exit_bars"] = args.dc_exit_bars
+        if args.adx_threshold:
+            grid["adx_threshold"] = args.adx_threshold
+        if not grid:
+            grid = {"dc_enter_bars": [10, 15, 20, 30], "dc_exit_bars": [5, 10, 15]}
 
     return grid
 

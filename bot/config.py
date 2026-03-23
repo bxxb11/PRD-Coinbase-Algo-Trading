@@ -82,6 +82,16 @@ class Config:
     rsi_sell_thresh: float
     trend_confirm_bars: int
 
+    # SuperTrend params
+    atr_period: int
+    atr_multiplier: float
+
+    # Donchian + ADX params
+    dc_enter_bars: int
+    dc_exit_bars: int
+    adx_period: int
+    adx_threshold: float
+
     # Sizing ($1–$20 per trade, spread-driven)
     min_trade_size_usd: float
     max_trade_size_usd: float
@@ -117,7 +127,7 @@ def load_config() -> Config:
         )
 
     strategy_name = _get_str("STRATEGY", "ema_rsi").lower()
-    _valid_strategies = {"ma_crossover", "macd", "ema_rsi"}
+    _valid_strategies = {"ma_crossover", "macd", "ema_rsi", "supertrend", "donchian_adx"}
     if strategy_name not in _valid_strategies:
         raise ConfigValidationError(
             f"STRATEGY must be one of {sorted(_valid_strategies)}, got: {strategy_name!r}"
@@ -141,11 +151,16 @@ def load_config() -> Config:
     macd_slow   = _get_int("MACD_SLOW", 26)
     macd_signal = _get_int("MACD_SIGNAL_PERIOD", 9)
     rsi_p       = _get_int("RSI_PERIOD", 21)
+    atr_p       = _get_int("ATR_PERIOD", 10)
+    dc_enter    = _get_int("DC_ENTER_BARS", 48)
+    adx_p       = _get_int("ADX_PERIOD", 14)
 
     min_candles = {
         "ma_crossover": ma_long + 10,
         "macd":         macd_slow + macd_signal + 10,
         "ema_rsi":      ema_long + rsi_p + 10,
+        "supertrend":   atr_p + 10,
+        "donchian_adx": dc_enter + adx_p + 10,
     }[strategy_name]
 
     candles_required = _get_int("CANDLES_REQUIRED", max(100, min_candles))
@@ -222,6 +237,14 @@ def load_config() -> Config:
         rsi_buy_thresh=_get_float("RSI_BUY_THRESH", 45.0),
         rsi_sell_thresh=_get_float("RSI_SELL_THRESH", 55.0),
         trend_confirm_bars=_get_int("TREND_CONFIRM_BARS", 3),
+        # SuperTrend
+        atr_period=atr_p,
+        atr_multiplier=_get_float("ATR_MULTIPLIER", 3.0),
+        # Donchian + ADX
+        dc_enter_bars=dc_enter,
+        dc_exit_bars=_get_int("DC_EXIT_BARS", 240),
+        adx_period=adx_p,
+        adx_threshold=_get_float("ADX_THRESHOLD", 25.0),
         # Sizing
         min_trade_size_usd=min_trade,
         max_trade_size_usd=max_trade,
