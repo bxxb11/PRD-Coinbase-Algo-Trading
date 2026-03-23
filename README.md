@@ -2,13 +2,13 @@
 
 A 24/7 automated trading bot for Coinbase Advanced Trade — backtest-validated, cloud-deployed, and built with stability as the first priority.
 
-Three selectable strategies (MA Crossover / MACD / **EMA+RSI**), a full backtesting engine with parameter sweep, and one-command GCP deployment via systemd.
+Five selectable strategies (MA Crossover / MACD / EMA+RSI / SuperTrend / **Donchian+ADX**), a full backtesting engine with parameter sweep, and one-command GCP deployment via systemd.
 
 ---
 
 ## Features
 
-- **3 selectable strategies** — switch with a single env var; EMA+RSI is the backtest-validated default
+- **5 selectable strategies** — switch with a single env var; Donchian+ADX is the aggressive winner, EMA+RSI the conservative default
 - **Full backtesting system** — Sharpe, max drawdown, win rate, profit factor, parameter sweep
 - **Scheduled or interval ticks** — run every N seconds, or at fixed clock times (e.g. 02:00 + 14:00 UTC)
 - **Paper & live trading** — single `PAPER_TRADING` flag; safe default is `True`
@@ -39,7 +39,7 @@ Three selectable strategies (MA Crossover / MACD / **EMA+RSI**), a full backtest
 main.py
   └── bot/trading_loop.py      ← orchestrates every tick (interval or scheduled)
         ├── market_data.py     ← CCXT: fetch_ohlcv + fetch_ticker_price
-        ├── strategy.py        ← MA Crossover / MACD / EMA+RSI + dispatch_strategy()
+        ├── strategy.py        ← 5 strategies + dispatch_strategy()
         ├── risk_manager.py    ← position cap + drawdown gate + PAUSED transition
         ├── execution.py       ← paper/live order router + dedup
         ├── state_manager.py   ← all SQLite reads/writes (WAL mode)
@@ -48,7 +48,7 @@ main.py
 
 backtest/
   ├── engine.py          ← vectorised BacktestEngine (O(n) precompute)
-  ├── strategies.py      ← vectorised signal functions for all 3 strategies
+  ├── strategies.py      ← vectorised signal functions for all 5 strategies
   ├── metrics.py         ← Sharpe, drawdown, profit factor, round-trip pairing
   ├── sweep.py           ← Cartesian parameter grid sweep
   ├── data_fetcher.py    ← paginated OHLCV fetch + CSV cache
@@ -82,18 +82,34 @@ fetch OHLCV → dispatch_strategy() → signal dedup → size trade
 
 | Strategy | Best Params | Profit Factor | Trades/yr | Verdict |
 |---|---|---|---|---|
-| **EMA+RSI** ← **WINNER** | EMA 13/55, RSI 21 | **1.12** | 27 | Only strategy > 1.0 |
-| MA Crossover | 20/200 | 1.34 (high variance) | 64 | Fee drag at scale |
-| MACD | 21/55/12 | 0.58 | 54 | Consistent loser |
+| **Donchian+ADX** ← **AGGRESSIVE WINNER** | enter=48h, exit=240h, ADX<25 | **4.61** | 30 | Breakout from consolidation |
+| **EMA+RSI** ← **CONSERVATIVE WINNER** | EMA 13/55, RSI 21 | **1.28** | 69 | Only classic strategy > 1.0 |
+| MA Crossover | 20/50 | 1.34 (high variance) | 64 | Fee drag at scale |
+| MACD | 12/26/9 | 0.58 | 54 | Consistent loser |
+| SuperTrend | ATR 10, ×3.0 | 0.54–0.90 | 130–400 | Too many trades, fee drag kills |
 
-**Why EMA+RSI wins:** 1.2% round-trip fee eliminates high-frequency strategies. EMA+RSI uses pullback entry (improving fill price ~0.5–1.5%), low trade frequency (27/yr minimises fee drag), and Fibonacci EMA periods (13/55) that align with BTC cycle structure.
+**Why Donchian+ADX wins (aggressive):** Enters on a 2-day price breakout *from consolidation* (ADX < 25), exits only when price falls below the 10-day low. Asymmetric hold lets winners run. 3.6× better profit factor than EMA+RSI.
+
+**Why EMA+RSI wins (conservative):** Pullback entry improves fill price ~0.5–1.5%; low frequency (69/yr) minimises fee drag; Fibonacci EMA periods (13/55) align with BTC cycle structure.
+
+**Why SuperTrend fails on 1h:** Generates 130–400 trades/year on 1h bars — the 1.2% round-trip fee eats every small gain. Published results showing 155% profit were on daily/4h timeframes.
 
 ### Strategy details
 
-**EMA+RSI** (`STRATEGY=ema_rsi`) — recommended
+**Donchian+ADX** (`STRATEGY=donchian_adx`) — aggressive recommended
+- BUY: close breaks above the highest close of the prior 48 bars AND ADX < 25 (entering from consolidation, not a mature trend)
+- SELL: close drops below the lowest close of the prior 240 bars
+- ADX computed with Wilder smoothing (pure pandas, no external libraries)
+
+**EMA+RSI** (`STRATEGY=ema_rsi`) — conservative recommended
 - BUY: EMA13 > EMA55 for ≥3 consecutive bars AND RSI crosses up through 45
 - SELL: EMA13 < EMA55 for ≥3 consecutive bars AND RSI crosses down through 55
 - RSI uses Wilder smoothing: `ewm(alpha=1/period, adjust=False)`
+
+**SuperTrend** (`STRATEGY=supertrend`) — reference only (not recommended on 1h)
+- BUY: SuperTrend band flips from bearish to bullish (close > ratcheted upper band)
+- SELL: SuperTrend band flips from bullish to bearish (close < ratcheted lower band)
+- Band ratchets: upper only moves down, lower only moves up
 
 **MACD** (`STRATEGY=macd`)
 - BUY: MACD histogram crosses from negative to positive (and MACD line > 0 if zero_filter=True)
@@ -119,16 +135,24 @@ spread ≥ 0.5%  →  $20.00  (strong divergence)
 
 ```bash
 # Single strategy run (first run fetches ~36s from exchange, cached after)
+python run_backtest.py --strategy donchian_adx --months 12
 python run_backtest.py --strategy ema_rsi --months 12
 
 # Load from cached CSV (fast, no exchange needed)
-python run_backtest.py --csv data/BTC_USD_1h_12m.csv --strategy ema_rsi
+python run_backtest.py --csv data/BTC_USD_1h_12m.csv --strategy donchian_adx
 
-# Parameter sweep (finds best EMA/RSI combinations)
-python run_backtest.py --strategy ema_rsi --sweep --ema-short 8 13 21 --ema-long 34 55 89
+# Parameter sweeps
+python run_backtest.py --strategy donchian_adx --sweep \
+    --dc-enter-bars 48 96 168 240 --dc-exit-bars 96 168 240
+
+python run_backtest.py --strategy ema_rsi --sweep \
+    --ema-short 8 13 21 --ema-long 34 55 89
+
+python run_backtest.py --strategy supertrend --sweep \
+    --atr-period 10 20 50 --atr-multiplier 3.0 4.0 5.0 6.0
 
 # Save equity curve + trade log to CSV files
-python run_backtest.py --strategy ema_rsi --months 12 --out-dir results/
+python run_backtest.py --strategy donchian_adx --months 12 --out-dir results/
 ```
 
 ---
@@ -154,7 +178,9 @@ Edit `.env` — at minimum set credentials:
 PAPER_TRADING=True
 COINBASE_API_KEY=your_key
 COINBASE_API_SECRET=your_secret
-STRATEGY=ema_rsi          # backtest winner
+STRATEGY=donchian_adx     # aggressive winner
+# or
+STRATEGY=ema_rsi          # conservative winner
 ```
 
 ### Run
@@ -163,12 +189,12 @@ STRATEGY=ema_rsi          # backtest winner
 python main.py
 ```
 
-Startup banner (paper mode, EMA+RSI, scheduled ticks off):
+Startup banner (paper mode, Donchian+ADX):
 ```
 ============================================================
 Coinbase Algo Trading Bot — PAPER MODE
 Pair:       BTC/USD
-Strategy:   ema_rsi  |  Timeframe: 1h
+Strategy:   donchian_adx  |  Timeframe: 1h
 Interval:   every 60s
 Trade size: $1.0–$20.0 (spread-sized)
 Max pos:    $200.0  |  Max drawdown: 25.0%
@@ -186,10 +212,16 @@ See **[deploy/DEPLOY.md](deploy/DEPLOY.md)** for the full step-by-step walkthrou
 Quick summary:
 1. Create a GCP e2-micro VM (~$6/month, free tier eligible)
 2. SSH in and run the one-line setup script
-3. Fill in your API keys with `nano`
+3. Fill in your API keys with `nano /opt/coinbase-bot/.env`
 4. `sudo systemctl enable --now coinbase-bot`
 
 The bot auto-restarts on crash and survives VM reboots via systemd.
+
+**To update the bot after code changes:**
+```bash
+sudo git config --global --add safe.directory /opt/coinbase-bot
+sudo bash /opt/coinbase-bot/deploy/update.sh
+```
 
 ---
 
@@ -211,21 +243,27 @@ All settings live in `.env`. Copy `.env.example` to get started.
 
 ### Strategy
 
-| Parameter | Default | Description |
+| Parameter | Default | Options / Description |
 |-----------|---------|-------------|
-| `STRATEGY` | `ema_rsi` | Active strategy: `ma_crossover` / `macd` / `ema_rsi` |
-| `EMA_SHORT` | `13` | Short EMA period (EMA+RSI only) |
-| `EMA_LONG` | `55` | Long EMA period (EMA+RSI only) |
-| `RSI_PERIOD` | `21` | RSI lookback period (EMA+RSI only) |
-| `RSI_BUY_THRESH` | `45.0` | RSI level to cross up for BUY signal |
-| `RSI_SELL_THRESH` | `55.0` | RSI level to cross down for SELL signal |
-| `TREND_CONFIRM_BARS` | `3` | Consecutive bars EMA alignment required |
+| `STRATEGY` | `ema_rsi` | `ma_crossover` / `macd` / `ema_rsi` / `supertrend` / `donchian_adx` |
+| `EMA_SHORT` | `13` | Short EMA period (ema_rsi) |
+| `EMA_LONG` | `55` | Long EMA period (ema_rsi) |
+| `RSI_PERIOD` | `21` | RSI lookback (ema_rsi) |
+| `RSI_BUY_THRESH` | `45.0` | RSI level to cross up for BUY (ema_rsi) |
+| `RSI_SELL_THRESH` | `55.0` | RSI level to cross down for SELL (ema_rsi) |
+| `TREND_CONFIRM_BARS` | `3` | Consecutive bars EMA alignment required (ema_rsi) |
+| `ATR_PERIOD` | `10` | ATR lookback (supertrend) |
+| `ATR_MULTIPLIER` | `3.0` | Band width multiplier (supertrend) |
+| `DC_ENTER_BARS` | `48` | Entry channel lookback in hours (donchian_adx) |
+| `DC_EXIT_BARS` | `240` | Exit channel lookback in hours (donchian_adx) |
+| `ADX_PERIOD` | `14` | ADX smoothing period (donchian_adx) |
+| `ADX_THRESHOLD` | `25.0` | Max ADX for entry — enforces breakout from consolidation (donchian_adx) |
 | `MACD_FAST` | `12` | MACD fast EMA period |
 | `MACD_SLOW` | `26` | MACD slow EMA period |
 | `MACD_SIGNAL_PERIOD` | `9` | MACD signal line period |
 | `MACD_ZERO_FILTER` | `True` | Only trade when MACD line is on correct side of zero |
-| `MA_SHORT_PERIOD` | `20` | Short MA window (MA crossover only) |
-| `MA_LONG_PERIOD` | `50` | Long MA window (MA crossover only) |
+| `MA_SHORT_PERIOD` | `20` | Short MA window (ma_crossover) |
+| `MA_LONG_PERIOD` | `50` | Long MA window (ma_crossover) |
 
 ### Sizing & Risk
 
@@ -314,7 +352,9 @@ All logs rotate at 10 MB, keeping 5 backups.
 |---------|--------|-------|
 | **v1** | ✅ Complete | Stable loop, MA crossover strategy, risk controls, paper + live trading |
 | **v2** | ✅ Complete | Backtesting engine, MACD + EMA+RSI strategies, parameter sweep, GCP deployment, scheduled ticks |
-| **v3** | Future | AI-generated strategies using Claude API |
+| **v3** | ✅ Complete | GCP deployment scripts, systemd service, update workflow |
+| **v4** | ✅ Complete | SuperTrend + Donchian+ADX strategies (research-backed, sweep-optimised) |
+| **v5** | Future | AI-generated strategies using Claude API |
 
 ---
 
