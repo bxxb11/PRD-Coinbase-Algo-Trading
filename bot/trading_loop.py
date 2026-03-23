@@ -167,6 +167,21 @@ def run_tick(
             log.warning(f"Tick #{tick_number}: ticker fetch failed — {e}")
             return
 
+        # ── Step 6b: For SELL — override size to close full position ───
+        # Prevents selling more BTC than we hold (e.g. selling $20 when
+        # we only bought $8.89). Sell signals always exit the entire position.
+        if signal == Signal.SELL:
+            if state["position_qty"] <= 0:
+                log.info(
+                    f"Tick #{tick_number}: SELL signal — no open position, skipping"
+                )
+                return
+            trade_size_usd = round(state["position_qty"] * current_price, 2)
+            log.info(
+                f"Tick #{tick_number}: SELL capped to full position "
+                f"${trade_size_usd:.2f} ({state['position_qty']:.8f} BTC)"
+            )
+
         # ── Step 7: Risk evaluation ─────────────────────────────────
         risk_result = risk_manager.evaluate_trade(
             signal, state, config, conn, trade_size_usd

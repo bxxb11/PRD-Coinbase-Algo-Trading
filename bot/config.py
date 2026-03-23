@@ -140,8 +140,8 @@ def load_config() -> Config:
             f"MA_SHORT_PERIOD ({ma_short}) must be less than MA_LONG_PERIOD ({ma_long})"
         )
 
-    ema_short = _get_int("EMA_SHORT", 13)
-    ema_long  = _get_int("EMA_LONG", 55)
+    ema_short = _get_int("EMA_SHORT", 21)
+    ema_long  = _get_int("EMA_LONG", 34)
     if ema_short >= ema_long:
         raise ConfigValidationError(
             f"EMA_SHORT ({ema_short}) must be less than EMA_LONG ({ema_long})"

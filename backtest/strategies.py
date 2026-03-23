@@ -326,8 +326,8 @@ DEFAULT_PARAMS = {
     "macd": {"fast": 12, "slow": 26, "signal_period": 9, "zero_filter": True},
     "ema_rsi": {
         "ema_short": 21,
-        "ema_long": 55,
-        "rsi_period": 14,
+        "ema_long": 34,      # 2025-2026 sweep winner (was 55)
+        "rsi_period": 21,    # 2025-2026 sweep winner (was 14)
         "rsi_buy_thresh": 45.0,
         "rsi_sell_thresh": 55.0,
         "trend_confirm_bars": 3,

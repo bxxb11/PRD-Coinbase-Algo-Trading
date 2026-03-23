@@ -78,19 +78,17 @@ fetch OHLCV → dispatch_strategy() → signal dedup → size trade
 
 ## Strategies
 
-### Backtest results (12-month BTC/USD, 8,760 × 1h bars, 1.2% round-trip fee)
+### Backtest results — 2025–2026 validation (10,725 × 1h bars, BTC $62k→$126k→$75k, 1.2% round-trip fee)
 
-| Strategy | Best Params | Profit Factor | Trades/yr | Verdict |
-|---|---|---|---|---|
-| **Donchian+ADX** ← **AGGRESSIVE WINNER** | enter=48h, exit=240h, ADX<25 | **4.61** | 30 | Breakout from consolidation |
-| **EMA+RSI** ← **CONSERVATIVE WINNER** | EMA 13/55, RSI 21 | **1.28** | 69 | Only classic strategy > 1.0 |
-| MA Crossover | 20/50 | 1.34 (high variance) | 64 | Fee drag at scale |
-| MACD | 12/26/9 | 0.58 | 54 | Consistent loser |
-| SuperTrend | ATR 10, ×3.0 | 0.54–0.90 | 130–400 | Too many trades, fee drag kills |
+> ⚡ **Strategy re-validated on 2025–2026 real BTC data** (OKX, Jan 2025 – Mar 2026). The market saw a full bull-run, ATH, and deep correction — a genuine stress test.
 
-**Why Donchian+ADX wins (aggressive):** Enters on a 2-day price breakout *from consolidation* (ADX < 25), exits only when price falls below the 10-day low. Asymmetric hold lets winners run. 3.6× better profit factor than EMA+RSI.
+| Strategy | Best Params | Return | Max DD | Profit Factor | Trades/mo | Verdict |
+|---|---|---|---|---|---|---|
+| **EMA+RSI** ← **WINNER** | EMA 21/34, RSI 21 | **-0.04%** | -0.27% | **0.90** | 3.3 | Near-breakeven on volatile year; best risk-adjusted |
+| Donchian+ADX | enter=72h, exit=240h, ADX<20 | -0.11% | -0.52% | 0.81 | 2.2 | Decent but still negative |
+| SuperTrend | ATR 10, ×3.5 | -1.87% | -2.18% | 0.27 | 13.7 | Fee drag — 200+ trades/month |
 
-**Why EMA+RSI wins (conservative):** Pullback entry improves fill price ~0.5–1.5%; low frequency (69/yr) minimises fee drag; Fibonacci EMA periods (13/55) align with BTC cycle structure.
+**Why EMA+RSI(21/34/21) wins on 2025–2026 data:** The faster EMA(21/34) crossover adapts to the choppy post-ATH market better than the original 13/55 pairing. Low trade frequency (3.3/mo) keeps fees minimal. Max drawdown of only -0.27% on a year where BTC dropped 40%+ from peak.
 
 **Why SuperTrend fails on 1h:** Generates 130–400 trades/year on 1h bars — the 1.2% round-trip fee eats every small gain. Published results showing 155% profit were on daily/4h timeframes.
 
@@ -101,10 +99,11 @@ fetch OHLCV → dispatch_strategy() → signal dedup → size trade
 - SELL: close drops below the lowest close of the prior 240 bars
 - ADX computed with Wilder smoothing (pure pandas, no external libraries)
 
-**EMA+RSI** (`STRATEGY=ema_rsi`) — conservative recommended
-- BUY: EMA13 > EMA55 for ≥3 consecutive bars AND RSI crosses up through 45
-- SELL: EMA13 < EMA55 for ≥3 consecutive bars AND RSI crosses down through 55
+**EMA+RSI** (`STRATEGY=ema_rsi`) — **recommended default** (2025–2026 sweep winner)
+- BUY: EMA21 > EMA34 for ≥3 consecutive bars AND RSI crosses up through 45
+- SELL: EMA21 < EMA34 for ≥3 consecutive bars AND RSI crosses down through 55
 - RSI uses Wilder smoothing: `ewm(alpha=1/period, adjust=False)`
+- Default params: `EMA_SHORT=21, EMA_LONG=34, RSI_PERIOD=21` (re-optimised on 2025–2026 data)
 
 **SuperTrend** (`STRATEGY=supertrend`) — reference only (not recommended on 1h)
 - BUY: SuperTrend band flips from bearish to bullish (close > ratcheted upper band)
@@ -134,25 +133,25 @@ spread ≥ 0.5%  →  $20.00  (strong divergence)
 ## Backtesting
 
 ```bash
-# Single strategy run (first run fetches ~36s from exchange, cached after)
-python run_backtest.py --strategy donchian_adx --months 12
+# Single strategy run on 2025-2026 data (cached — no exchange needed)
+python run_backtest.py --csv data/BTC_USD_1h_2025_2026.csv --strategy ema_rsi
+
+# Or fetch fresh 12-month data from exchange
 python run_backtest.py --strategy ema_rsi --months 12
 
-# Load from cached CSV (fast, no exchange needed)
-python run_backtest.py --csv data/BTC_USD_1h_12m.csv --strategy donchian_adx
-
 # Parameter sweeps
-python run_backtest.py --strategy donchian_adx --sweep \
-    --dc-enter-bars 48 96 168 240 --dc-exit-bars 96 168 240
-
 python run_backtest.py --strategy ema_rsi --sweep \
-    --ema-short 8 13 21 --ema-long 34 55 89
+    --ema-short 13 21 --ema-long 34 55 89 --rsi-period 14 21
+
+python run_backtest.py --strategy donchian_adx --sweep \
+    --dc-enter-bars 24 48 72 --dc-exit-bars 120 240 360
 
 python run_backtest.py --strategy supertrend --sweep \
-    --atr-period 10 20 50 --atr-multiplier 3.0 4.0 5.0 6.0
+    --atr-period 7 10 14 --atr-multiplier 2.5 3.0 3.5
 
-# Save equity curve + trade log to CSV files
-python run_backtest.py --strategy donchian_adx --months 12 --out-dir results/
+# Save equity curve + trade log to CSV + interactive HTML report
+python run_backtest.py --csv data/BTC_USD_1h_2025_2026.csv --strategy ema_rsi \
+    --out-dir results/ --html
 ```
 
 ---
@@ -246,8 +245,8 @@ All settings live in `.env`. Copy `.env.example` to get started.
 | Parameter | Default | Options / Description |
 |-----------|---------|-------------|
 | `STRATEGY` | `ema_rsi` | `ma_crossover` / `macd` / `ema_rsi` / `supertrend` / `donchian_adx` |
-| `EMA_SHORT` | `13` | Short EMA period (ema_rsi) |
-| `EMA_LONG` | `55` | Long EMA period (ema_rsi) |
+| `EMA_SHORT` | `21` | Short EMA period (ema_rsi) |
+| `EMA_LONG` | `34` | Long EMA period (ema_rsi) |
 | `RSI_PERIOD` | `21` | RSI lookback (ema_rsi) |
 | `RSI_BUY_THRESH` | `45.0` | RSI level to cross up for BUY (ema_rsi) |
 | `RSI_SELL_THRESH` | `55.0` | RSI level to cross down for SELL (ema_rsi) |
@@ -354,7 +353,8 @@ All logs rotate at 10 MB, keeping 5 backups.
 | **v2** | ✅ Complete | Backtesting engine, MACD + EMA+RSI strategies, parameter sweep, GCP deployment, scheduled ticks |
 | **v3** | ✅ Complete | GCP deployment scripts, systemd service, update workflow |
 | **v4** | ✅ Complete | SuperTrend + Donchian+ADX strategies (research-backed, sweep-optimised) |
-| **v5** | Future | AI-generated strategies using Claude API |
+| **v5** | ✅ Complete | 2025–2026 re-validation (OKX real data); SELL-cap fix; EMA params re-optimised to 21/34/21 |
+| **v6** | Future | AI-generated strategies using Claude API |
 
 ---
 

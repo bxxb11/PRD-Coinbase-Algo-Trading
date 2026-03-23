@@ -225,7 +225,20 @@ class BacktestEngine:
                 continue
 
             # Execute (in-memory)
-            size_qty = round(size_usd / current_price, 8) if current_price > 0 else 0.0
+            # ── SELL: always close the ENTIRE open position ─────────────────
+            # Never sell more than we hold. Using position_qty × price (not
+            # MA-spread sizing) ensures we exit fully on each sell signal.
+            if signal == Signal.SELL:
+                if state["position_qty"] <= 0:
+                    # No position to close — treat as HOLD
+                    equity_curve.append(state["current_equity_usd"])
+                    equity_timestamps.append(current_ts)
+                    continue
+                size_qty = round(state["position_qty"], 8)
+                size_usd = round(size_qty * current_price, 2)
+            else:
+                size_qty = round(size_usd / current_price, 8) if current_price > 0 else 0.0
+
             fee_usd = round(size_usd * self._fee_rate, 2)
 
             if signal == Signal.BUY:
